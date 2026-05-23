@@ -1,0 +1,12 @@
+{
+  "name": "paldo-mcp",
+  "version": "0.1.0",
+  "description": "Query 7M Korean synthetic personas (NVIDIA Nemotron-Personas-Korea) from Claude Code",
+  "mcp": {
+    "command": "paldo-mcp",
+    "args": ["server"]
+  },
+  "install": {
+    "post": "paldo-mcp init --skip-register"
+  }
+}
