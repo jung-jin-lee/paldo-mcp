@@ -21,4 +21,7 @@ export {
   getByUuids,
   panel,
   sample,
+  stats,
+  type StatsBucket,
+  type StatsDimension,
 } from "./queries.js";

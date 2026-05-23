@@ -51,6 +51,32 @@ export const PanelInputSchema = z.object({
   seed: z.number().int().optional(),
 });
 
+export const StatsInputSchema = z.object({
+  group_by: z
+    .enum([
+      "province",
+      "district",
+      "sex",
+      "age_decade",
+      "marital_status",
+      "education_level",
+      "housing_type",
+      "family_type",
+      "occupation",
+    ])
+    .describe("집계 기준 컬럼. age_decade는 10세 단위로 묶음(20대, 30대 등)."),
+  filters: SampleFiltersSchema.optional().describe(
+    "집계 모집단을 좁히는 필터 (선택)",
+  ),
+  limit: z
+    .number()
+    .int()
+    .min(1)
+    .max(300)
+    .optional()
+    .describe("반환할 버킷 수 (default: 50, 카운트 내림차순)"),
+});
+
 export const SearchInputSchema = z.object({
   query: z
     .string()

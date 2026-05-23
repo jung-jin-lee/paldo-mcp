@@ -239,6 +239,66 @@ export function describeSchema(): SchemaInfo {
   return SCHEMA;
 }
 
+export type StatsDimension =
+  | "province"
+  | "district"
+  | "sex"
+  | "age_decade"
+  | "marital_status"
+  | "education_level"
+  | "housing_type"
+  | "family_type"
+  | "occupation";
+
+export interface StatsBucket {
+  value: string;
+  count: number;
+}
+
+function dimensionExpression(dim: StatsDimension): string {
+  // age_decade is the only synthetic dimension. We use `age - age % 10` to
+  // guarantee integer arithmetic — DuckDB's `/` is float by default, which
+  // produces 50.0, 51.0, 52.0, etc. instead of the intended 50/60/70 buckets.
+  // We also append "대" so the labels read naturally ("20대", "30대"…).
+  return dim === "age_decade"
+    ? "((age - age % 10)::VARCHAR || '대')"
+    : dim;
+}
+
+/**
+ * Group-by aggregation over the persona dataset. Returns top buckets by count.
+ * Useful for sanity-checking "do I have enough of X?" before sampling.
+ *
+ * Example: `stats({ group_by: 'province', filters: { age_range: [30, 39] } })`
+ * returns province-by-province population of 30-somethings.
+ */
+export async function stats(opts: {
+  group_by: StatsDimension;
+  filters?: SampleFilters;
+  limit?: number;
+}): Promise<StatsBucket[]> {
+  assertDatasetPresent();
+  const conn = await getConnection();
+  const { sql: where, params, types } = buildWhere(opts.filters);
+  const expr = dimensionExpression(opts.group_by);
+  const limit = Math.min(Math.max(opts.limit ?? 50, 1), 300);
+
+  const reader = await conn.runAndReadAll(
+    `SELECT ${expr} AS value, COUNT(*) AS count
+     FROM read_parquet($parquet) ${where}
+     GROUP BY value
+     ORDER BY count DESC
+     LIMIT ${limit}`,
+    { parquet: getParquetGlob(), ...params },
+    { parquet: VARCHAR, ...types },
+  );
+  const rows = reader.getRowObjectsJson() as unknown as Array<{
+    value: string;
+    count: number | bigint;
+  }>;
+  return rows.map((r) => ({ value: r.value, count: Number(r.count) }));
+}
+
 export async function countMatching(
   filters: SampleFilters | undefined,
 ): Promise<number> {

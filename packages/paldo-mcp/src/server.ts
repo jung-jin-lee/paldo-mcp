@@ -6,6 +6,7 @@ import {
   getByUuid,
   panel,
   sample,
+  stats,
 } from "paldo-core";
 import { search } from "./embeddings/search.js";
 import { error, ok } from "./format.js";
@@ -15,6 +16,7 @@ import {
   PanelInputSchema,
   SampleInputSchema,
   SearchInputSchema,
+  StatsInputSchema,
 } from "./schemas.js";
 
 function buildServer(): McpServer {
@@ -98,6 +100,27 @@ function buildServer(): McpServer {
       try {
         const results = await search(args);
         return ok(results);
+      } catch (err) {
+        return error(err instanceof Error ? err.message : String(err));
+      }
+    },
+  );
+
+  server.registerTool(
+    "persona_stats",
+    {
+      title: "분포 통계 (GROUP BY 집계)",
+      description:
+        "특정 컬럼으로 모집단을 그룹핑해 카운트 반환. 사전 모집단 크기 확인, " +
+        "필터 결합 시 충분한 샘플 확보 가능한지 검증, 시각화 데이터 추출에 사용. " +
+        "예: group_by='province'로 지역별 인구, age_decade로 연령대 분포. " +
+        "filters와 결합 시 부분 모집단의 분포 확인. 카운트 내림차순 top-N.",
+      inputSchema: StatsInputSchema.shape,
+    },
+    async (args) => {
+      try {
+        const buckets = await stats(args);
+        return ok(buckets);
       } catch (err) {
         return error(err instanceof Error ? err.message : String(err));
       }

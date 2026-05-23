@@ -1,16 +1,68 @@
-import { existsSync, statSync } from "node:fs";
-import { mkdir } from "node:fs/promises";
+import { existsSync, readdirSync, statSync } from "node:fs";
+import { mkdir, rm } from "node:fs/promises";
+import { join } from "node:path";
 import { FLOAT, LIST, VARCHAR, listValue } from "@duckdb/node-api";
 import kleur from "kleur";
 import { getConnection, getParquetGlob } from "paldo-core";
 import { buildPassageText, embedPassages } from "./embed.js";
 import { getEmbeddingsPath, getIndexDir } from "./paths.js";
 
+export interface BuildOptions {
+  /** Build only the first N personas. Useful for smoke tests. */
+  limit?: number;
+  /** Number of rows fed to the embedding model per forward pass. */
+  embedBatch?: number;
+  /**
+   * Rows per checkpoint chunk on disk. Each chunk is a standalone parquet so
+   * an interrupted build resumes from the last completed chunk.
+   * 5000 ≈ 8 MB per chunk × 200 chunks for the full 1 M dataset.
+   */
+  checkpointRows?: number;
+  /** Force a fresh build — wipes existing checkpoints before starting. */
+  force?: boolean;
+  /** Called after each embedding batch with cumulative progress. */
+  onProgress?: (done: number, total: number) => void;
+}
+
+export interface BuildResult {
+  rows: number;
+  path: string;
+  elapsedMs: number;
+  resumedFromRow: number;
+}
+
 export interface IndexInfo {
   path: string;
   exists: boolean;
   rows?: number;
   bytes?: number;
+}
+
+const DEFAULT_CHECKPOINT_ROWS = 5000;
+
+interface PersonaRow {
+  uuid: string;
+  persona: string;
+  hobbies_and_interests: string;
+  career_goals_and_ambitions: string;
+}
+
+function getPartialsDir(): string {
+  return join(getIndexDir(), ".partials");
+}
+
+function chunkPath(idx: number): string {
+  return join(getPartialsDir(), `chunk-${String(idx).padStart(6, "0")}.parquet`);
+}
+
+function listExistingChunks(): number[] {
+  const dir = getPartialsDir();
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir)
+    .map((f) => /^chunk-(\d{6})\.parquet$/.exec(f))
+    .filter((m): m is RegExpExecArray => m !== null)
+    .map((m) => Number.parseInt(m[1]!, 10))
+    .sort((a, b) => a - b);
 }
 
 export function hasIndex(): boolean {
@@ -31,35 +83,20 @@ export async function describeIndex(): Promise<IndexInfo> {
   return { path, exists: true, rows: Number(row.n), bytes };
 }
 
-export interface BuildOptions {
-  /** Build only the first N personas. Useful for smoke tests. */
-  limit?: number;
-  /** Number of rows fed to the embedding model per forward pass. */
-  embedBatch?: number;
-  /** Called after each embedding batch with cumulative progress. */
-  onProgress?: (done: number, total: number) => void;
-}
-
-export interface BuildResult {
-  rows: number;
-  path: string;
-  elapsedMs: number;
-}
-
-interface PersonaRow {
-  uuid: string;
-  persona: string;
-  hobbies_and_interests: string;
-  career_goals_and_ambitions: string;
-}
-
 export async function buildIndex(opts: BuildOptions = {}): Promise<BuildResult> {
   const t0 = Date.now();
   await mkdir(getIndexDir(), { recursive: true });
+
+  const partialsDir = getPartialsDir();
+  if (opts.force) {
+    await rm(partialsDir, { recursive: true, force: true });
+  }
+  await mkdir(partialsDir, { recursive: true });
+
+  const checkpointRows = opts.checkpointRows ?? DEFAULT_CHECKPOINT_ROWS;
   const conn = await getConnection();
 
-  // Pull only the fields we embed plus the join key. Adding LIMIT is cheap
-  // (parquet zone maps) and makes smoke tests fast.
+  // Fetch the population we plan to embed.
   const limitClause = opts.limit ? `LIMIT ${opts.limit}` : "";
   const reader = await conn.runAndReadAll(
     `SELECT uuid, persona, hobbies_and_interests, career_goals_and_ambitions
@@ -73,40 +110,80 @@ export async function buildIndex(opts: BuildOptions = {}): Promise<BuildResult> 
     throw new Error("No personas found — run `paldo-mcp init` first.");
   }
 
+  // Resume detection. Each completed chunk holds exactly `checkpointRows` rows
+  // (except possibly the last), so chunk count tells us how far we got.
+  const existing = listExistingChunks();
+  const completedChunks = existing.length;
+  const resumedFromRow = Math.min(completedChunks * checkpointRows, total);
+  let nextChunkIdx = completedChunks;
+
+  if (resumedFromRow > 0 && resumedFromRow < total) {
+    console.error(
+      kleur.cyan(
+        `  resuming from row ${resumedFromRow.toLocaleString()} (` +
+          `${completedChunks} checkpoint(s) already on disk)`,
+      ),
+    );
+  }
+
   const embedBatch = opts.embedBatch ?? 32;
+  let pendingUuids: string[] = [];
+  let pendingVecs: Float32Array[] = [];
 
-  // Fresh table per build — we always rewrite the parquet at the end.
-  await conn.run(
-    `CREATE OR REPLACE TABLE _paldo_embeddings (uuid VARCHAR, vec FLOAT[])`,
-  );
-  const appender = await conn.createAppender("_paldo_embeddings");
+  // Flush a chunk to a standalone parquet file.
+  const flushChunk = async (): Promise<void> => {
+    if (pendingUuids.length === 0) return;
+    const idx = nextChunkIdx++;
+    const tableName = "_paldo_chunk";
+    await conn.run(
+      `CREATE OR REPLACE TABLE ${tableName} (uuid VARCHAR, vec FLOAT[])`,
+    );
+    const appender = await conn.createAppender(tableName);
+    for (let i = 0; i < pendingUuids.length; i++) {
+      appender.appendVarchar(pendingUuids[i]!);
+      appender.appendValue(
+        listValue(Array.from(pendingVecs[i]!)),
+        LIST(FLOAT),
+      );
+      appender.endRow();
+    }
+    appender.closeSync();
+    const path = chunkPath(idx);
+    await conn.run(
+      `COPY ${tableName} TO '${path.replace(/'/g, "''")}' (FORMAT PARQUET)`,
+    );
+    await conn.run(`DROP TABLE ${tableName}`);
+    pendingUuids = [];
+    pendingVecs = [];
+  };
 
-  // Row-by-row append: appendDataChunk + setColumns has a known issue where
-  // wrapping LIST values via listValue() silently writes zero rows even
-  // though the API reports success. Row appender is rock-solid and the
-  // throughput cost at ≤1M rows is negligible (embedding inference dominates).
-  for (let i = 0; i < total; i += embedBatch) {
+  // Main loop: embed, accumulate, flush at checkpoint boundaries.
+  for (let i = resumedFromRow; i < total; i += embedBatch) {
     const batch = rows.slice(i, i + embedBatch);
     const texts = batch.map(buildPassageText);
     const vecs = await embedPassages(texts);
     for (let j = 0; j < batch.length; j++) {
-      appender.appendVarchar(batch[j]!.uuid);
-      appender.appendValue(listValue(Array.from(vecs[j]!)), LIST(FLOAT));
-      appender.endRow();
+      pendingUuids.push(batch[j]!.uuid);
+      pendingVecs.push(vecs[j]!);
+      if (pendingUuids.length >= checkpointRows) await flushChunk();
     }
     opts.onProgress?.(Math.min(i + batch.length, total), total);
   }
-  appender.closeSync();
+  await flushChunk();
 
-  // Single-file parquet output. COPY is effectively atomic so an interrupted
-  // build leaves either no embeddings.parquet or the previous one untouched.
-  const path = getEmbeddingsPath();
+  // Merge every checkpoint into the final embeddings.parquet, then clean up.
+  // Order by uuid for a stable scan order — useful for any downstream tooling.
+  const finalPath = getEmbeddingsPath();
+  const glob = join(partialsDir, "chunk-*.parquet").replace(/'/g, "''");
   await conn.run(
-    `COPY _paldo_embeddings TO '${path.replace(/'/g, "''")}' (FORMAT PARQUET)`,
+    `COPY (SELECT * FROM read_parquet('${glob}') ORDER BY uuid)
+       TO '${finalPath.replace(/'/g, "''")}' (FORMAT PARQUET)`,
   );
-  await conn.run(`DROP TABLE _paldo_embeddings`);
+  // Clean up only after merge succeeds — if the merge crashes the partials
+  // survive for the next resume.
+  await rm(partialsDir, { recursive: true, force: true });
 
-  return { rows: total, path, elapsedMs: Date.now() - t0 };
+  return { rows: total, path: finalPath, elapsedMs: Date.now() - t0, resumedFromRow };
 }
 
 /**
