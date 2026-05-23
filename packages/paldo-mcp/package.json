@@ -1,6 +1,6 @@
 {
   "name": "paldo-mcp",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "MCP server for NVIDIA Nemotron-Personas-Korea — 7M Korean personas, callable from Claude Code",
   "type": "module",
   "bin": {
@@ -14,7 +14,7 @@
   "dependencies": {
     "@huggingface/transformers": "^4.2.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "paldo-core": "workspace:*",
+    "paldo-core": "^0.3.0",
     "commander": "^12.1.0",
     "kleur": "^4.1.5",
     "zod": "^3.23.0"
