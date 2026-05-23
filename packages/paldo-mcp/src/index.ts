@@ -21,7 +21,7 @@ program
   .description(
     "paldo-mcp — query 7M Korean synthetic personas (NVIDIA Nemotron-Personas-Korea) from Claude Code.",
   )
-  .version("0.1.0");
+  .version("0.3.0");
 
 program
   .command("init")
