@@ -1,6 +1,6 @@
 {
   "name": "paldo-mcp",
-  "version": "0.3.0",
+  "version": "0.3.2",
   "private": true,
   "description": "MCP server for NVIDIA Nemotron-Personas-Korea — 7M Korean personas, callable from Claude Code",
   "type": "module",

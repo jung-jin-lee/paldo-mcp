@@ -4,6 +4,7 @@ import { runDeinit } from "./commands/deinit.js";
 import { runInit } from "./commands/init.js";
 import { runStatus } from "./commands/status.js";
 import { runUninstall } from "./commands/uninstall.js";
+import { getCliVersion, runVersion } from "./commands/version.js";
 import { runServer } from "./server.js";
 
 // Shared option: defined once so init/deinit stay in sync if we add a scope.
@@ -21,7 +22,7 @@ program
   .description(
     "paldo-mcp — query 7M Korean synthetic personas (NVIDIA Nemotron-Personas-Korea) from Claude Code.",
   )
-  .version("0.3.1");
+  .version(getCliVersion());
 
 program
   .command("init")
@@ -68,6 +69,13 @@ program
   )
   .option("--keep-data", "Remove registrations only; keep parquet files")
   .action(runUninstall);
+
+program
+  .command("version")
+  .description(
+    "Print version info (paldo-mcp + Node + platform + data dir). Useful for bug reports.",
+  )
+  .action(runVersion);
 
 program
   .command("server")
