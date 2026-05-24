@@ -9,3 +9,4 @@ bun.lockb
 # local-only dev artifacts
 scratch/
 *.log
+.cachebro/
